@@ -1,0 +1,8 @@
+__pycache__/
+.spyproject/
+.ipynb_checkpoints/
+*.csv
+*.log
+*.pyc
+.env
+cryocon-env/
