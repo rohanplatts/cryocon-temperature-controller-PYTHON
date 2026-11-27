@@ -1,201 +1,287 @@
-# How the code works
+# How the Code Was Developed, and How to Modify It
 
-This guide explains [cryo-control.py](../../cryo-control.py) so that a student can understand and modify it.
+This document explains the development of the CryoCon temperature-control script, with the aim of helping future PHY424 students understand and extend it themselves.
 
-The aim is not to implement a temperature controller in Python: the CryoCon already contains that controller. Python tells it what to do, reads the instruments and saves the experiment.
+The program began as a script for measuring resistance and temperature. Temperature control was subsequently introduced, followed by support for running several experiments automatically.
 
-The current version also runs multiple temperature phases in sequence and saves the final plot as a PNG.
+The important ideas are **communicating directly with instruments, constructing SCPI commands, controlling the order of operations, and organizing the code into reusable functions**.
 
-## 1. The physical system
+Any modifications can be submitted as pull requests to this github page, or, you can fork it of course. 
 
-A temperature sensor measures temperature. A heater supplies heat. A control loop uses a chosen sensor reading and a target temperature to regulate an output.
+## 1. The original measurement script
 
-```text
-Target temperature → CryoCon PID loop → heater → apparatus
-                           ↑                         |
-                           └──── temperature sensor ┘
+The starting point was a Python program that repeatedly measured:
 
-Python configures the loop and reads both sensors and the DMM.
-```
+- Temperature from CryoCon sensor A.
+- Temperature from CryoCon sensor B.
+- Four-wire resistance from a digital multimeter.
+- Elapsed time.
 
-Inputs A and B are independent temperature sensors. They are not heater numbers. Either may be assigned as feedback for a loop, but the physical wiring and thermal coupling determine whether the choice is sensible.
+The data were written to a CSV file and displayed in a live Matplotlib graph.
 
-| Loop | Physical output |
-| --- | --- |
-| 1 | Primary powered heater |
-| 2 | Secondary powered heater |
-| 3, 4 | Analogue voltage outputs for external equipment, not built-in heater power supplies |
-
-The program restricts selection to loops 1 and 2. The hardware supports four loops.
-
-A sensor that responds slowly or not at all to a chosen heater can cause excessive heating elsewhere. Confirm the actual wiring rather than relying on channel names.
-
-In PID mode the controller regulates using the difference between measured and target temperature. In RAMPP mode its internal target changes at a programmed rate; PID attempts to follow it.
-
-The actual sample temperature is not guaranteed to follow the ramp exactly. Cooling requires an appropriate thermal sink or refrigeration.
-
-## 2. Original explanations in the program
-
-The script's original feedback-sensor note is reproduced below, with only line wrapping adjusted:
-
-> Note that if the sensor is well insulated from the corresponding heater loop, you will notice looping in the Resistance vs Temperature plot. It is thus best to use the sensor that is most responsive to the active heater loop, and reduce the ramp_rate to encourage thermal equilibrium between the sensor of desire and the most responsive sensor.
->
-> For example, if i am using heater loop 1, and sensor A is close to it, whilst sensor B is in thermal contact with the sample holder and represents the actual temperature of the sample, then during cooling, i will use CONTROL_CHANNEL = "A", with a small ramp rate.
-
-This is experimental advice specific to sensor/heater coupling.
-
-Importantly, the feedback sensor controls heater action, while the other sensor may track sample temperature. The target-completion test uses the **feedback sensor**, not necessarily the sample sensor.
-
-### Original explanation of the instrument commands
-
-The following is adapted closely from the large explanatory string in the script. Tables have been converted to Markdown. Spelling of SCPI and small technical wording errors have been corrected so that the text distinguishes the communication library from the command language.
-
-> Below, initial connection to the instruments follows the original code. The new code follows from the `if ENABLE_CONTROL` qualifier. The key insight to modifying the original code to allow control of the instruments was that we were not restricted to the arguments that appear directly in `cryocon-22c-controller` (a Python library adapted to Python control of these CryoCon instruments). Since it employs `easy-scpi`, we can use its `cryo.query("str")` method to pass through a SCPI command (here `str` is the SCPI command that the controller can natively read, passed through to `cryo.query()` as a string). The library handles communication with the controller.
->
-> The main component needed for controller connection is simply (in this case change port as needed):
+Four packages provide most of this functionality:
 
 ```python
 import cryocon_22c_controller as cc
+import pyvisa
+import matplotlib.pyplot as plt
+import csv
+```
 
+| Package | Purpose |
+|---|---|
+| `cryocon_22c_controller` | Communicates with the CryoCon Model 22C |
+| `pyvisa` | Communicates with the digital multimeter |
+| `matplotlib` | Produces the live resistance–temperature plot |
+| `csv` | Writes experimental measurements to a file |
+
+The CryoCon connection is established with:
+
+```python
 cryo = cc.CryoconController(port="COM3", backend="")
 cryo.connect()
 ```
 
-> For example, if one wants to change the source of the heating input channel and the source of heat, reading the CryoCon Model 22C User's Guide, one learns that the relevant SCPI parameters are `SOURCE` and `LOOP`, respectively. So if you want to change this to channel A, using heater loop 1, one would use the following:
+Once connected, temperature measurements are straightforward:
+
+```python
+temp_a = float(cryo.temperature("a"))
+temp_b = float(cryo.temperature("b"))
+```
+
+Similarly, the multimeter is accessed through PyVISA:
+
+```python
+rm = pyvisa.ResourceManager()
+dmm = rm.open_resource(DMM_ADDRESS)
+
+dmm.write("CONF:FRES")
+resistance = float(dmm.query("READ?").strip())
+```
+
+`CONF:FRES` configures four-wire resistance measurement, while `READ?` requests a reading.
+
+Notice that the program communicates with the two instruments through different libraries. The measurement loop simply combines their readings into one dataset.
+
+The next challenge was to make Python **change the CryoCon's temperature setpoint and heater configuration**, rather than merely observe them.
+
+## 2. the Key: controlling the CryoCon using SCPI
+
+The `cryocon_22c_controller` package provides convenient methods for common tasks, including reading temperatures and enabling control.
+
+However, not every configurable parameter of the CryoCon is exposed through a dedicated Python method.
+
+**The central insight was that we are not restricted to the methods explicitly provided by the Python library.**
+
+The CryoCon understands a command language called **SCPI** (*Standard Commands for Programmable Instruments*).
+
+The Python driver communicates through `easy-scpi` and provides a method:
+
+```python
+cryo.query("COMMAND")
+```
+
+This allows us to send supported CryoCon command strings directly.
+
+The Python package handles the instrument connection; the CryoCon interprets the commands.
+
+### Finding commands
+
+The starting point for adding new functionality is the [CryoCon Model 22C User's Guide](https://file-storage.github.io/manuals/cryocon_22c_user_manual.pdf), particularly its remote-operation section.
+
+For example, the following controller parameters are useful:
+
+| Parameter | SCPI keyword |
+|---|---|
+| Control loop | `LOOP` |
+| Feedback temperature sensor | `SOURCE` |
+| Temperature setpoint | `SETP` |
+| Setpoint ramp rate | `RATE` |
+| Control mode | `TYPE` |
+| Maximum setpoint | `MAXSET` |
+
+A SCPI command follows a structure such as:
+
+```SCPI
+LOOP 1:SOURCE A
+```
+
+This assigns sensor A as the feedback source for control loop 1.
+
+Likewise:
+
+```SCPI
+LOOP 1:RATE 0.5
+```
+
+sets the programmed ramp rate for loop 1 to 0.5 K/min.
+
+To send these commands from Python:
+
+```python
+cryo.query("LOOP 1:SOURCE A")
+cryo.query("LOOP 1:RATE 0.5")
+```
+
+The program usually uses **f-strings** instead of hard-coding the values:
+
+```python
+loop = 1
+channel = "A"
+rate = 0.5
+
+cryo.query(f"LOOP {loop}:SOURCE {channel}")
+cryo.query(f"LOOP {loop}:RATE {rate}")
+```
+
+This is important for generalisation.
+
+### Reading parameters back
+
+Appending `?` to a supported SCPI parameter generally requests its current value.
+
+For example:
+
+```python
+source = cryo.query("LOOP 1:SOURCE?")
+rate = cryo.query("LOOP 1:RATE?")
+```
+
+The distinction is:
+
+- `LOOP 1:RATE 0.5` changes a setting.
+- `LOOP 1:RATE?` reads a setting.
+
+**Whenever adding a new control command, read the parameter back where possible.** Sending a command without receiving an error does not necessarily prove that the instrument accepted the intended value.
+
+Instrument responses are often strings rather than Python numbers. For example, a temperature limit might be returned as `"300.000000K"`.
+
+The script handles this by removing the known unit suffix before conversion:
+
+```python
+max_setpoint = float(
+    cryo.query(f"LOOP {loop}:MAXSET?")
+    .strip()
+    .removesuffix("K")
+)
+```
+
+When adding another command, check the manual for its response format, permitted values and units.
+
+## 3. Adding temperature control
+
+Having established how to send commands, the next task was to configure the heater correctly.
+
+The CryoCon supports several control modes:
+
+| Mode | Function |
+|---|---|
+| `OFF` | Disable the loop |
+| `PID` | Standard PID temperature regulation |
+| `RAMPP` | PID control with a ramping setpoint |
+| `MAN` | Manually specified output |
+| `TABLE` | PID using stored tuning parameters |
+| `RAMPT` | Ramping using stored PID parameters |
+
+The current script supports `PID` and `RAMPP`.
+
+These mode names come from the instrument's command language, so their spelling matters.
+
+### Why command order matters
+
+In `RAMPP` mode, we want the controller to move its setpoint gradually from the current temperature toward a target.
+
+If the final setpoint is applied without correctly initializing the ramp, the controller may not behave as intended.
+
+The script therefore uses the following sequence:
+
+1. Select the heater loop and feedback sensor.
+2. Select `RAMPP` mode.
+3. Configure the ramp rate.
+4. Set the initial setpoint to the measured feedback temperature.
+5. Enable temperature control.
+6. Send the final target setpoint.
+
+The essential code is:
+
+```python
+cryo.query(f"LOOP {loop}:SOURCE {channel.upper()}")
+cryo.query(f"LOOP {loop}:TYPE {mode}")
+
+if mode == "RAMPP":
+    cryo.query(f"LOOP {loop}:RATE {RAMP_RATE}")
+
+    initial_temp = float(cryo.temperature(channel))
+    cryo.query(f"LOOP {loop}:SETP {initial_temp}")
+else:
+    cryo.query(f"LOOP {loop}:SETP {SETPOINT_K}")
+
+cryo.enable()
+
+if mode == "RAMPP":
+    cryo.query(f"LOOP {loop}:SETP {SETPOINT_K}")
+```
+
+This is only the central command sequence. The actual program also performs validation, read-back checks and heater-loop management.
+
+In `PID` mode, the final setpoint is applied directly; no programmed setpoint ramp is required.
+
+### Feedback sensor selection
+
+The `SOURCE` parameter specifies which sensor the CryoCon uses for feedback.
+
+This matters because the sensor closest to the heater may respond significantly faster than one attached to the sample.
+
+For our apparatus, sensor A generally responds more quickly to heater loop 1 than sensor B.
+
+Using a poorly coupled feedback sensor can introduce overshoot or oscillations. The controller responds to the delayed sensor measurement, potentially applying too much or too little heat.
+
+This is why **the feedback sensor and ramp rate should be chosen with the physical arrangement in mind**.
+
+Also remember that the controller regulates heater power. Cooling requires a separate cryocooler; Python cannot make the apparatus cool faster than its cooling system permits.
+
+## 4. From one experiment to multiple experiments
+
+The original temperature-control version was designed around one set of parameters:
 
 ```python
 CONTROL_CHANNEL = "A"
 HEATER_LOOP = 1
-
-cryo.query(f"LOOP {HEATER_LOOP}:SOURCE {CONTROL_CHANNEL}")
+CONTROL_MODE = "RAMPP"
+SETPOINT_K = 270
+RAMP_RATE = 0.5
 ```
 
-> A list of the SCPI parameters that you might care about, pulled from the manufacturer's documentation:
+Once that experiment finished, running another required changing the settings and executing the script again. This was made reusable through the following: 
 
-| Brief description of parameter | SCPI parameter |
-| --- | --- |
-| Heater input source | SOURCE |
-| Heater loop | LOOP |
-| Setpoint | SETP |
-| Ramp rate | RATE |
-| Temperature control type | TYPE |
+### Step 1: Put the original program inside a function
 
-> Note that, for temperature control type, this code only supports PID and RAMPP. But the SCPI command options are available for the remaining modes:
-
-| CONTROL TYPE | MEANING |
-| --- | --- |
-| OFF | Disable loop |
-| PID | Standard temperature regulation |
-| RAMPP | PID with temperature ramping |
-| MAN | Manually specified output |
-| TABLE | PID using stored tuning parameters |
-| RAMPT | Ramping with stored PID parameters |
-
-> One final important thing. All parameters must be specified chronologically in the Python script BEFORE the final setpoint is specified.
-
-That final sentence describes the intended ramp sequence for this program; it is not a universal rule for every instrument command.
-
-See section 6. The snippets above illustrate syntax, not a complete or safe heating procedure.
-
-## 3. How to construct SCPI commands and arguments
-
-SCPI stands for **Standard Commands for Programmable Instruments**.
-
-The instrument understands command strings; a Python driver transmits them. `easy-scpi` is a Python library, not the language itself.
-
-The Model 22C manual describes loop commands using patterns such as:
-
-```text
-LOOP {1 | 2 | 3 | 4}:RATe <rate>
-```
-
-The braces, vertical bars and angle brackets here are documentation notation, not literal characters to send.
-
-Pick one loop number and replace the placeholder with a real numeric value.
-
-The uppercase portion of a mixed-case keyword is its short form; the documented full form can also be used.
-
-A colon separates parts of the command; spaces separate the command from its arguments. A question mark requests a value.
-
-| Intent | Example sent to CryoCon |
-| --- | --- |
-| Read source | `LOOP 1:SOURCE?` |
-| Read control type | `LOOP 1:TYPE?` |
-| Read setpoint | `LOOP 1:SETP?` |
-| Read ramp rate | `LOOP 1:RATE?` |
-| Read power limit | `LOOP 1:MAXPWR?` |
-| Set source to A | `LOOP 1:SOURCE A` |
-| Set ramp rate to 0.5 | `LOOP 1:RATE 0.5` |
-
-The last two examples modify the instrument; do not send them merely to test communication. Verify all relevant safety conditions before writing parameters.
-
-### Python f-strings
-
-Python f-strings substitute the values between braces:
-
-```python
-loop = 1
-rate = 0.5
-
-command = f"LOOP {loop}:RATE {rate}"
-
-print(command)
-# LOOP 1:RATE 0.5
-```
-
-Printing the string does not send anything to the controller.
-
-To read a parameter from an established connection, use:
-
-```python
-response = cryo.query(f"LOOP {loop}:MAXSET?")
-print(response)
-```
-
-The response is text, often with whitespace or units.
-
-For example, this instrument returned `300.000000K`, which `float()` cannot parse directly. The program strips whitespace and removes the known K suffix before conversion.
-
-Do not blindly strip arbitrary units: confirm the units and range.
-
-### Why use cryo.query()?
-
-The [CryoCon driver](https://github.com/bicarlsen/cryocon-22c-controller) explains why `query()` is used even when setting parameters: “All commands generate a response from the controller”.
-
-This keeps its command/response handling synchronized.
-
-For the DMM, use its own protocol: typically `write()` for a setting and `query()` for a response.
-
-The manufacturer's [22C manual](https://file-storage.github.io/manuals/cryocon_22c_user_manual.pdf), Remote Operation, describes accepted commands and arguments.
-
-Do not assume another model accepts them.
-
-When adding a feature:
-
-1. Find the documented command.
-2. Check its arguments and units.
-3. Prefer a read-only query when first investigating it.
-4. Make an approved change only after checking the relevant hardware.
-5. Read back the result to verify it was accepted.
-
-## 4. What changed for multiple experiments
-
-The program was deliberately **wrapped rather than rewritten**.
-
-The original instrument configuration, acquisition loop, CSV writer, plotting and cleanup are inside:
+Most of the original program was preserved, but placed inside:
 
 ```python
 def run_experiment(experiment):
 ```
 
-The final `for` loop calls it once per dictionary:
+The argument `experiment` is a Python dictionary containing the settings for one phase.
+
+At the beginning of the function, the dictionary values are assigned to the variables used throughout the existing program:
 
 ```python
-for experiment in EXPERIMENTS:
-    run_experiment(experiment)
+name = experiment["name"]
+CONTROL_CHANNEL = experiment["channel"]
+HEATER_LOOP = experiment["heater_loop"]
+CONTROL_MODE = experiment["mode"]
+SETPOINT_K = experiment["setpoint_k"]
+RAMP_RATE = experiment["ramp_rate"]
 ```
 
-The dictionaries at the top contain the per-phase settings:
+This approach minimizes changes to the original measurement code.
+
+Rather than rewriting instrument commands to use dictionary lookups everywhere, the program keeps the original variable names inside the function.
+
+### Step 2: Define a sequence
+
+The settings for multiple phases are stored in a list:
 
 ```python
 EXPERIMENTS = [
@@ -213,275 +299,96 @@ EXPERIMENTS = [
         "heater_loop": 1,
         "mode": "RAMPP",
         "setpoint_k": 300.0,
-        "ramp_rate": 0.5,
+        "ramp_rate": 1.0,
     },
 ]
 ```
 
-These are source-code examples, not independently validated thermal conditions.
+Each dictionary represents one experiment.
 
-The fields mean:
+### Step 3: Call the function repeatedly
 
-| Field | Meaning |
-| --- | --- |
-| `name` | Short label included in the filename |
-| `channel` | Feedback sensor A or B |
-| `heater_loop` | Powered output 1 or 2 |
-| `mode` | PID or RAMPP |
-| `setpoint_k` | Target temperature in kelvin |
-| `ramp_rate` | Programmed K/min rate, used for RAMPP |
+At the end of the script:
 
-The number and order of dictionaries determine the sequence.
+```python
+for experiment in EXPERIMENTS:
+    run_experiment(experiment)
+```
 
-One dictionary gives one experiment.
+Python takes the first dictionary, passes it to `run_experiment()`, waits for that function to finish, and then proceeds to the next dictionary.
 
-Shared settings remain outside the dictionaries:
+Each function call also creates its own timestamped filename and initializes fresh measurement arrays.
 
-- `ENABLE_CONTROL`
-- `MATERIAL`
-- `DATA_DIR`
-- Connection addresses
-- `MAX_SAFE_TEMP_K`
-- `SCAN_INTERVAL`
-- `PLOT_EVERY`
-- `TARGET_TOLERANCE_K`
-- `HOLD_SECONDS`
+## 5. Implementing automatic experiment completion
 
-### The new completion test
+Making experiments run sequentially introduced another problem:
 
-After each acquired data point the script compares the **measured feedback temperature** to `SETPOINT_K`:
+**How does the program know when one experiment has finished?**
+
+A fixed duration is unsuitable because the apparatus may reach different temperatures at different rates.
+
+Instead, the script uses a temperature tolerance and a stabilization time.
+
+The completion test is:
 
 ```python
 controlled_temp = temp_a if channel == "a" else temp_b
 
 if abs(controlled_temp - SETPOINT_K) <= TARGET_TOLERANCE_K:
-
     if stable_since is None:
         stable_since = time.monotonic()
 
     if time.monotonic() - stable_since >= HOLD_SECONDS:
-        print(f"Phase '{name}' complete.")
         break
-
 else:
     stable_since = None
 ```
 
-If the sensor leaves the permitted band, the stability timer starts over.
+The logic is:
 
-For example:
+1. Read the temperature from the selected feedback sensor.
+2. Check whether it is sufficiently close to the target.
+3. If so, start or continue the stabilization timer.
+4. If the temperature leaves the permitted range, reset the timer.
+5. Once the required time has elapsed continuously within the range, exit the measurement loop.
 
-```python
-TARGET_TOLERANCE_K = 0.1
-HOLD_SECONDS = 60
-```
+The `break` statement exits the `while True` measurement loop. The function then performs cleanup and returns to the outer `for` loop, which begins the next phase.
 
-These require the measured feedback temperature to remain within ±0.1 K of the target for approximately one minute.
+### Why use `time.monotonic()`?
 
-This checks the measured sensor temperature, not whether the CryoCon's programmed ramp status says complete.
+`time.monotonic()` is intended for measuring elapsed time. it is not affected by the computer's clock being adjusted.
 
-The parameters are experimental choices, not a proof of thermal equilibrium throughout the sample.
+### How to modify the completion condition
 
-**There is deliberately no `max_minutes` or overall phase timeout.**
+Suppose a future experiment should finish only when **both temperature sensors** are within tolerance. (a very fair extension I might add).
 
-If a setpoint is unreachable, the current phase can continue indefinitely unless interrupted, communication fails or a safety mechanism acts.
-
-A failed phase does not automatically advance.
-
-### What happens between phases?
-
-When the inner measurement loop breaks:
-
-1. The current CSV file is closed.
-2. The original `finally` block attempts to disengage temperature control.
-3. The instrument connections are closed.
-4. The final plot is saved as a PNG.
-5. The function returns.
-6. The outer loop starts the next experiment.
-
-This reconnection between stages is intentional: it preserves the existing experiment code and cleanup approach instead of introducing persistent instrument state.
-
-The `except KeyboardInterrupt` branch re-raises Ctrl+C, so it cannot silently trigger the next phase.
-
-**Important:** Instrument shutdown must be confirmed at the physical controller. A software stop request alone does not guarantee that the heater has disengaged.
-
-## 5. Settings, validation and instrument initialization
-
-The imports supply:
-
-- CSV writing
-- Timestamps
-- Filesystem paths
-- Array operations
-- Plotting
-- VISA communication
-- The CryoCon driver
-
-The settings block separates values an operator changes from the measurement logic below.
-
-The script normalizes channel and mode strings and rejects unsupported values.
-
-It checks the setpoint against a software ceiling and requires a positive ramp rate no greater than 100 in RAMPP mode. This is a code validation limit, not a safe rate recommendation.
-
-It tries to switch an Inline Matplotlib backend to QtAgg for interactive graphics.
-
-It then creates a VISA resource manager and a CryoCon object.
-
-Inside the `try` block it connects to the controller and opens the DMM.
+The condition could be replaced with:
 
 ```python
-dmm.write("SYSTE:REMOTE")
-dmm.write("*CLS")
-dmm.write("CONF:FRES")
+within_tolerance = (
+    abs(temp_a - SETPOINT_K) <= TARGET_TOLERANCE_K
+    and
+    abs(temp_b - SETPOINT_K) <= TARGET_TOLERANCE_K
+)
 ```
 
-These request remote operation, clear instrument status and configure four-wire resistance.
+The existing hold-timer logic could then use `if within_tolerance:`.
 
-`READ?` later triggers/returns a reading.
+## 6. Recording and plotting measurements
 
-Configuration and repeated measurement are separate.
+The measurement loop retains most of the original data-acquisition code.
 
-Four-wire resistance uses separate excitation and voltage-sense leads. It reduces lead-resistance effects, but excitation current, self-heating, range and integration time still matter.
+### Obtaining measurements
 
-Consult the actual DMM manual before changing them.
-
-The program requires control to be initially disengaged, checks the selected sensor's units and reads the maximum allowed setpoint.
-
-The maximum setpoint is a controller setting, not proof of apparatus safety.
-
-## 6. Temperature control: the central change
-
-The original measurement script read sensor temperatures and existing setpoints. It did not initiate regulation.
-
-The newer code enters the configuration block if `ENABLE_CONTROL` is true.
-
-The procedure is:
-
-1. Query loops 1–4 and temporarily turn every non-selected loop OFF, remembering its former mode.
-2. Assign the chosen sensor to the selected heater with `SOURCE` and verify the reported source.
-3. Set the chosen `TYPE`.
-4. In RAMPP, set `RATE` and set the initial target to the measured feedback temperature. In PID, set the final target directly.
-5. Check the reported mode.
-6. Call `cryo.enable()` and check that the instrument reports control engaged.
-7. In RAMPP, send the final target after engaging control.
-8. Print the reported setpoint and continue measuring.
-
-The core command sequence in the program is:
-
-```python
-# Excerpt only:
-# The actual script includes configuration and safety checks.
-
-cryo.query(f"LOOP {loop}:SOURCE {channel.upper()}")
-cryo.query(f"LOOP {loop}:TYPE {mode}")
-
-if mode == "RAMPP":
-    cryo.query(f"LOOP {loop}:RATE {RAMP_RATE}")
-
-    initial_temp = float(cryo.temperature(channel))
-    cryo.query(f"LOOP {loop}:SETP {initial_temp}")
-
-else:
-    cryo.query(f"LOOP {loop}:SETP {SETPOINT_K}")
-
-cryo.enable()
-
-if mode == "RAMPP":
-    cryo.query(f"LOOP {loop}:SETP {SETPOINT_K}")
-```
-
-The [22C manual](https://file-storage.github.io/manuals/cryocon_22c_user_manual.pdf), printed pp. 57–59, describes the ramp sequence: configure the rate and starting setpoint, engage regulation, then change the setpoint to initiate the ramp.
-
-It continues regulating after completion.
-
-The program chooses the present measured temperature as the starting setpoint. That is a design decision, not a guaranteed smooth transition.
-
-Stable PID parameters and appropriate power limits must already be configured.
-
-### Example: calculating ramp duration
-
-Suppose:
-
-- Starting temperature: 294 K
-- Final target: 300 K
-- Ramp rate: 0.5 K/min
-
-The ideal programmed ramp duration is:
-
-```text
-(300 - 294) / 0.5 = 12 minutes
-```
-
-This describes the programmed setpoint. It does not guarantee that the actual sample takes 12 minutes to reach 300 K.
-
-The global `CONTROL` command, wrapped by `enable()`, can engage every configured control loop.
-
-Temporarily disabling the other loops is a deliberate policy for a single-heater experiment, not a hardware requirement that all experiments use a single loop.
-
-It must be permitted by the operator.
-
-The program does not change PID gains or heater range.
-
-## 7. Acquisition and timing
-
-The `while True` loop reads both temperatures, checks the software limit and queries resistance.
-
-It appends readings to in-memory lists, writes a row to the CSV, prints a summary and refreshes the plot.
+Each cycle reads:
 
 ```python
 temp_a = float(cryo.temperature("a"))
 temp_b = float(cryo.temperature("b"))
-
 resistance = float(dmm.query("READ?").strip())
 ```
 
-The readings are sequential, not simultaneous.
-
-`time.monotonic()` measures elapsed time and scan duration without depending on changes to the wall clock.
-
-Sleeping only for the remaining requested interval aims for the requested cadence.
-
-Slow instrument responses or plotting may make sampling slower than requested.
-
-The acquisition loop now has one additional exit: the feedback sensor meets the target-band and hold-time condition.
-
-It then closes the current CSV and returns so the outer loop can run the next phase.
-
-The software ceiling, an error or an interrupt can also end a run.
-
-## 8. CSV, uncertainties and saved PNGs
-
-The date/time, material and experiment name form a filename.
-
-For example:
-
-```text
-RvsT_24_11_2026_13_00_00_copper_cool-down.csv
-```
-
-The same base name is used for the saved PNG.
-
-The CSV contains:
-
-| Column | Meaning |
-| --- | --- |
-| Time (s) | Elapsed time since acquisition started |
-| Temperature A (K) | Sensor A |
-| Temperature B (K) | Sensor B |
-| Resistance (Ohm) | Signed DMM reading |
-| Uncertainty A (K) | Estimated temperature A uncertainty |
-| Uncertainty B (K) | Estimated temperature B uncertainty |
-| Uncertainty R (Ohm) | Estimated resistance uncertainty |
-
-Writing and flushing each row reduces data loss if Python is interrupted.
-
-It is not a guarantee of durable writes during power or network failures.
-
-Time begins at zero for **each phase**. The files are separate rather than one continuous record.
-
-### Uncertainty calculations
-
-The uncertainty expressions are inherited from the original code, with the channel-B calculation corrected:
+The script also calculates estimated uncertainties:
 
 ```python
 u_a = 0.00005 * abs(temp_a) + 0.00008
@@ -489,13 +396,58 @@ u_b = 0.00005 * abs(temp_b) + 0.00008
 u_r = 0.00012 * abs(resistance) + 4e-10
 ```
 
-These are not independently validated calibration models.
+These formulas are inherited from the measurement code and should be verified against instrument specifications for quantitative uncertainty analysis.
 
-Review the sensor and DMM specifications, selected range, calibration and uncertainty budget before using them for published results.
+### Writing CSV files
 
-### Saved plot: one PNG per phase
+The `csv` module creates the file and writes its column headings.
 
-With the figure-saving change already added in the `finally` block, the plot is saved in the same directory as the CSV:
+Inside the measurement loop, the program adds a row:
+
+```python
+writer.writerow([
+    elapsed, temp_a, temp_b, resistance,
+    u_a, u_b, u_r
+])
+
+file.flush()
+```
+
+The `file.flush()` call asks Python to write buffered data promptly rather than waiting for the file to close.
+
+This reduces the amount of data that may be lost if a run is interrupted.
+
+### Updating the live plot
+
+The program initially creates two empty plotted series:
+
+```python
+line_a, = ax.plot([], [], ".", label="Channel A")
+line_b, = ax.plot([], [], ".", label="Channel B")
+```
+
+As measurements accumulate, it updates their existing data:
+
+```python
+r = np.abs(resistances)
+
+line_a.set_data(temperature_a, r)
+line_b.set_data(temperature_b, r)
+
+ax.relim()
+ax.autoscale_view()
+
+fig.canvas.draw()
+fig.canvas.flush_events()
+```
+
+This is more efficient than repeatedly creating an entirely new graph.
+
+Notice that the graph plots the **absolute value** of resistance, whereas the CSV retains the signed measurement.
+
+### Saving the plot
+
+A PNG can be saved alongside the CSV using:
 
 ```python
 if "fig" in locals() and csv_path.exists():
@@ -506,136 +458,120 @@ if "fig" in locals() and csv_path.exists():
     )
 ```
 
-For example:
+This belongs in the cleanup section if automatic plot export is desired.
 
-```text
-RvsT_24_11_2026_13_00_00_copper_cool-down.csv
-RvsT_24_11_2026_13_00_00_copper_cool-down.png
-```
+`with_suffix(".png")` reuses the CSV filename but replaces its extension.
 
-`with_suffix(".png")` replaces only the extension.
+## 7. Cleanup and error handling
 
-The guard avoids attempting a save before the graph or CSV exists.
+Laboratory programs must handle interruptions differently from ordinary data-processing scripts.
 
-The figure represents the last plotted dataset for that phase.
+A failure while controlling a heater can leave equipment in an unsafe state.
 
-If `PLOT_EVERY` is greater than one, the most recent measurements might not be reflected in the plot when stopping. All acquired readings remain in the CSV.
+For this reason, the script uses Python's `try`, `except` and `finally` structure.
 
-A forced Python termination or power failure may prevent the PNG from being saved.
+The important property of `finally` is that its code is attempted whether the experiment finishes normally or raises an ordinary exception.
 
-The PNG is not a substitute for the raw CSV.
+The cleanup logic attempts to:
 
-## 9. Live plotting
+1. Disengage CryoCon temperature control.
+2. Verify that control is no longer enabled.
+3. Restore previously modified control-loop modes when safe.
+4. Close the DMM connection.
+5. Disconnect the CryoCon.
+6. Close the VISA resource manager.
 
-Instead of clearing and reconstructing axes for every sample, the script creates two point series once.
+The script tracks whether control was attempted and which other loop modes were changed. If heater shutdown cannot be confirmed, it raises an error rather than starting another experiment.
 
-`set_data()` changes the existing series.
+A `KeyboardInterrupt` is also re-raised so Ctrl+C cancels the entire sequence.
 
-`relim()` and `autoscale_view()` adjust the axes.
+## 8. How to extend the script yourself
 
-Drawing, flushing GUI events and pausing briefly keep the window responsive.
+The most useful general procedure is:
 
-`PLOT_EVERY` controls refresh frequency independently of CSV logging.
+### A. Adding a new CryoCon command
 
-The plot uses absolute resistance for each temperature input.
+1. Consult the Model 22C manual's remote-operation command list.
+2. Identify the command and its arguments.
+3. Construct the SCPI string in Python.
+4. Test a read-only query first, where available.
+5. Add the command to the appropriate configuration section.
+6. Verify the response or read the parameter back.
+7. Consider whether the change needs to be reversed during cleanup.
 
-The CSV preserves the resistance sign. A negative resistance reading may be diagnostically important.
-
-The live plot does not include uncertainty bars, although the uncertainty values remain in the CSV.
-
-## 10. Shutdown and known limitations
-
-The `try/except/finally` structure handles normal interruption and ordinary errors.
-
-If the script attempted to engage control, its cleanup attempts to stop the CryoCon before restoring other loop modes.
-
-It closes both instrument connections and keeps the final figure available without blocking the next stage.
-
-Restored loop modes can become active again on a later global CONTROL command. Selected loop settings remain changed.
-
-A software stop request must not be treated as confirmation of physical heater shutdown.
-
-### Current limitations
-
-The following are limitations of the implementation, not features:
-
-- Only the selected sensor's units are checked, even though both are logged as K and used in the software cutoff.
-- The maximum setpoint is checked before changing feedback source. Checking afterward would be more robust.
-- Temperature safety checks begin during acquisition, after control can be engaged.
-- Invalid/nonfinite readings and hardware fault states are not explicitly validated.
-- The program prints ramp/setpoint read-backs but does not compare all their numeric values.
-- Forced termination, broken communication or blocked reads can prevent timely shutdown.
-- Software is not a replacement for independent hardware overtemperature protection.
-- The cleanup message can print a filename even if acquisition never started. Verify the CSV exists and contains rows.
-- The PNG-save guard checks that a CSV exists, not that the CSV contains valid data.
-- Data lists grow throughout each phase, and every plot refresh redraws all accumulated points.
-- There is no upper phase-duration limit.
-- A stable feedback sensor does not prove that the entire sample has equilibrated.
-- No direct sample temperature-gradient or temperature-rate-of-change stabilization test is included.
-
-## 11. How to modify the program
-
-Begin with an offline change or measurement-only test.
-
-**For another temperature stage, add one dictionary to `EXPERIMENTS`. No additional function or instrument logic is needed.**
-
-Change settings rather than the acquisition logic unless a genuinely new feature is needed.
-
-### Changing stabilization criteria
-
-For example, to finish each phase after 120 seconds within ±0.2 K:
+For example, to investigate the configured ramp rate:
 
 ```python
-TARGET_TOLERANCE_K = 0.2
-HOLD_SECONDS = 120
+response = cryo.query(f"LOOP {loop}:RATE?")
+print(response)
 ```
 
-These parameters are shared between all phases.
-
-### Adding or removing experiments
-
-To remove a phase, delete its dictionary.
-
-To repeat one, copy its dictionary and change its `name` and target.
-
-Do not duplicate the entire program or add additional `for` loops inside the measurement loop.
-
-### Changing the temperature ramp
-
-Modify:
+To change the rate, after confirming the permitted range and hardware state:
 
 ```python
-"setpoint_k": 270.0,
-"ramp_rate": 0.5,
+cryo.query(f"LOOP {loop}:RATE {RAMP_RATE}")
 ```
 
-The ability to run multiple phases does **not** mean the apparatus can cool at a chosen rate just by changing `ramp_rate`.
+The same approach can be used to investigate other documented parameters.
 
-It must have a physical mechanism to remove heat.
+### B. Adding another recorded quantity
 
-### Adding new measurements
+Suppose we want the CSV to record the temperature difference between sensors A and B.
 
-To add another measured quantity:
+First calculate it inside the measurement loop:
 
-1. Find the relevant instrument command in its manual.
-2. Query the instrument using its existing connection.
-3. Parse and validate the response.
-4. Add a matching CSV column header.
-5. Write the new measurement into each row.
-6. Decide whether it should also appear on the plot.
+```python
+temp_difference = temp_b - temp_a
+```
 
-To implement a new control mode, review its hardware behavior and command ordering, then update validation and read-back checks.
+Then add a heading when the CSV is created:
 
-Never remove shutdown checks or raise limits merely to bypass an error.
+```python
+"Temperature difference B-A (K)"
+```
 
-## 12. Primary references
+Finally, append `temp_difference` to each `writer.writerow(...)` call.
 
-- [CryoCon Model 22C User's Guide](https://file-storage.github.io/manuals/cryocon_22c_user_manual.pdf) — hardware, overtemperature protection, ramping and remote-control commands.
-- [cryocon-22c-controller](https://github.com/bicarlsen/cryocon-22c-controller) — Python driver and methods.
-- [easy-scpi](https://github.com/bicarlsen/easy-scpi) — communication layer.
-- [PyVISA](https://pyvisa.readthedocs.io/en/latest/introduction/communication.html) — instrument communication.
-- [Matplotlib interactive figures](https://matplotlib.org/stable/users/explain/figure/interactive_guide.html) — interactive plotting.
-- [Python time](https://docs.python.org/3/library/time.html) — timing and monotonic clocks.
-- [Keysight Truevolt documentation](https://www.keysight.com/us/en/support/34461A/digital-multimeter-6-5-digit-truevolt-dmm.html) — consult the manual for the actual DMM model and firmware.
+A new instrument measurement follows the same pattern, except that it also requires a communication command and appropriate parsing.
 
-[Setup](setup.md) · [Usage guide](usage.md) · [Quick start](../quick-start.md)
+### C. Changing how experiments are sequenced
+
+The present program advances when the feedback temperature remains within tolerance for a specified duration.
+
+That behaviour could be replaced or supplemented with other conditions, such as:
+
+- Requiring both sensors to stabilize.
+- Checking the temperature's rate of change.
+- Waiting for an additional instrument measurement to satisfy a condition.
+- Performing multiple readings at a fixed temperature before advancing.
+
+These extensions belong in the **experiment completion section**, not in the instrument connection code.
+
+Keep a distinction between the controller's internal temperature regulation and Python's logic for deciding when a phase is complete.
+
+### D. Adding another control mode
+
+The CryoCon supports modes beyond the `PID` and `RAMPP` modes currently permitted by the program.
+
+However, adding a mode involves more than changing the accepted string in the validation code.
+
+You must also determine:
+
+- Which instrument parameters the new mode requires.
+- The correct sequence for configuring those parameters.
+- How the mode behaves when control is enabled.
+- How to verify that configuration succeeded.
+- How to stop and restore the instrument safely.
+
+The manufacturer's manual, rather than assumptions based on the existing RAMPP implementation, should determine this behaviour.
+
+
+## References
+
+- [CryoCon Model 22C User's Guide](https://file-storage.github.io/manuals/cryocon_22c_user_manual.pdf) — instrument commands, arguments and control modes.
+- [CryoCon Python driver](https://github.com/bicarlsen/cryocon-22c-controller) — Python interface used by the script.
+- [easy-scpi](https://github.com/bicarlsen/easy-scpi) — underlying instrument communication library.
+- [PyVISA documentation](https://pyvisa.readthedocs.io/en/latest/) — communication with VISA-compatible instruments.
+- [Python documentation](https://docs.python.org/3/) — functions, exceptions, CSV files and timing.
+
+For installation and ordinary operation, see the separate [Setup](setup.md) and [Usage](usage.md) guides.
