@@ -2,10 +2,11 @@
 
 Python automation for temperature-dependent four-wire resistance measurements with a **CryoCon Model 22C** and a VISA-connected digital multimeter.
 
-The current `cryo-control.py` runs a configurable **sequence of temperature phases** (for example, cooldown then warmup). Each phase has its own feedback sensor, heater loop, setpoint, ramp rate, live plot, CSV file and final PNG image. A phase finishes after the feedback temperature stays within the chosen tolerance for the configured hold time. There is **no phase timeout**.
+The current `cryo-control.py` runs a configurable **sequence of temperature phases** (for example, cooldown then warmup). Each phase has its own feedback sensor, heater loop, setpoint, ramp rate, live plot, CSV file and final PNG image.
 
 ## Documentation
 
+- [UofT APL specific tutorial](docs/UofT-RES-specific.md)
 - [Quick start](docs/quick-start.md) — experienced users, under 200 words.
 - [Beginner setup and Spyder](docs/comprehensive-docs/setup.md) — installation, environment and instrument addresses.
 - [How the code works](docs/comprehensive-docs/code-explanation.md) — annotated architecture, SCPI and source explanation.
