@@ -6,11 +6,11 @@ The current `cryo-control.py` runs a configurable **sequence of temperature phas
 
 ## Documentation
 
-- [UofT APL specific tutorial](docs/UofT-RES-specific.md)
-- [Quick start](docs/quick-start.md) — experienced users, under 200 words.
-- [Beginner setup and Spyder](docs/comprehensive-docs/setup.md) — installation, environment and instrument addresses.
-- [How the code works](docs/comprehensive-docs/code-explanation.md) — annotated architecture, SCPI and source explanation.
-- [Usage guide](docs/comprehensive-docs/usage.md) — planning sweeps, monitoring, saving results and troubleshooting.
+- [UofT APL specific tutorial](Docs/UofT-RES-specific.md)
+- [Quick start](Docs/QuickStart.md) — experienced users, under 200 words.
+- [Beginner setup and Spyder](Docs/Comprehensive-docs/Setup.md) — installation, environment and instrument addresses.
+- [How the code works](Docs/Comprehensive-docs/Code-explanation.md) — annotated architecture, SCPI and source explanation.
+- [Usage guide](Docs/Comprehensive-docs/Usage.md) — planning sweeps, monitoring, saving results and troubleshooting.
 
 Start with [cryo-control.py](cryo-control.py); the supplied Conda specification is [cryocon-env.yml](cryocon-env.yml).
 
