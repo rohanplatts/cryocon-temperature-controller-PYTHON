@@ -190,4 +190,4 @@ Only enable heating after completing the pre-run checks in the [usage guide](usa
 - [PyVISA: communicating with instruments](https://pyvisa.readthedocs.io/en/latest/introduction/communication.html)
 - [CryoCon Python driver](https://github.com/bicarlsen/cryocon-22c-controller)
 
-[Quick start](../quick-start.md) · [Code explanation](code-explanation.md) · [Usage guide](usage.md)
+[Quick start](../QuickStart.md) · [Code explanation](Code-explanation.md) · [Usage guide](Usage.md)
