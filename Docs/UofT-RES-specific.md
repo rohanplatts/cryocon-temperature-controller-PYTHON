@@ -9,9 +9,9 @@ This guide is specific to the Resistivity in metals (RES) experiment station of 
 The following files should already be available on the `T` drive:
 
 - `T:\cryocon\cryocon-env.yml`
-- `T:\cryocon\cryo-controller.py`
+- `T:\cryocon\cryo-control.py`
 
-If they are not, create the `T:\cryocon` folder and download [cryo-controller.py](https://github.com/rohanplatts/cryocon-temperature-controller-PYTHON/blob/main/cryo-control.py) and [cryocon-env.yml](https://github.com/rohanplatts/cryocon-temperature-controller-PYTHON/blob/main/cryocon-env.yml) files to it, from this github repository. It is important that these files are saved to the `T` drive (or any external drive) as this drive is not wiped. 
+If they are not, create the `T:\cryocon` folder and download [cryo-control.py](https://github.com/rohanplatts/cryocon-temperature-controller-PYTHON/blob/main/cryo-control.py) and [cryocon-env.yml](https://github.com/rohanplatts/cryocon-temperature-controller-PYTHON/blob/main/cryocon-env.yml) files to it, from this github repository. It is important that these files are saved to the `T` drive (or any external drive) as this drive is not wiped. 
 
 ## 2. Install the python environment
 
@@ -37,7 +37,7 @@ Wait for the installation to finish.
 
 In Spyder, select **File** → **Open**, then navigate to:
 
-`T:\cryocon\cryo-controller.py`
+`T:\cryocon\cryo-control.py`
 
 ## 5. Program your temperature experiments
 
