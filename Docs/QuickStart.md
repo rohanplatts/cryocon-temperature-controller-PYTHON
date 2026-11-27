@@ -12,4 +12,4 @@
 4. Verify wiring, sensor units, cooling, PID/heater limits and independent protection. Start with `ENABLE_CONTROL = False` to test acquisition; interrupt that test manually.
 5. Run with **F5**. With control enabled, each phase records its own CSV until the feedback sensor stays within tolerance for the hold duration, saves its final plot as a PNG, and then starts the next phase. **No timeout exists.** Ctrl+C or errors cancel the remaining phases. Confirm physical control is OFF after stopping.
 
-[Full setup](comprehensive-docs/setup.md) · [How it works](comprehensive-docs/code-explanation.md) · [Usage](comprehensive-docs/usage.md)
+[Full setup](Comprehensive-Docs/Setup.md) · [How it works](Comprehensive-Docs/Code-explanation.md) · [Usage](Comprehensive-Docs/Usage.md)
